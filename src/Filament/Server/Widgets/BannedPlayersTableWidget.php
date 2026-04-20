@@ -58,7 +58,7 @@ class BannedPlayersTableWidget extends BaseWidget
         $all = $provider->getPlayers($serverId);
         
         // Filter Banned
-        $banned = array_filter($all, fn($p) => $p['is_banned']);
+        $banned = array_filter($all, fn ($p) => !empty($p['is_banned']));
         
         return collect($banned)->map(fn($item) => new Player($item));
     }

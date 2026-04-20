@@ -116,6 +116,12 @@ return [
     'settings' => [
         'rcon_enabled' => 'RCON / Élő állapot engedélyezése',
         'rcon_enabled_helper' => 'Valós idejű adatlekérést tesz lehetővé (Leltár, Életerő stb.) RCON-on keresztül. Ehhez engedélyezni kell az RCON-t a server.properties-ben.',
+        'rcon_host' => 'RCON Hoszt / IP',
+        'rcon_host_helper' => 'Az RCON kapcsolathoz használt IP-cím vagy hosztnév (példa: 127.0.0.1).',
+        'rcon_port' => 'RCON Port',
+        'rcon_port_helper' => 'RCON TCP port (alapértelmezett: 25575).',
+        'rcon_password' => 'RCON Jelszó',
+        'rcon_password_helper' => 'A server.properties-ben vagy a szerver indítási beállításaiban megadott RCON jelszó.',
         'nav_sort' => 'Navigációs sorrend',
         'nav_sort_helper' => 'Rendezési sorrend az oldalsó menüben. Az alacsonyabb számok magasabban jelennek meg. (Alapértelmezett: 2)',
         'saved' => 'Beállítások sikeresen elmentve.',

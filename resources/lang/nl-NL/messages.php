@@ -117,6 +117,12 @@ return [
     'settings' => [
         'rcon_enabled' => 'RCON / Live Status inschakelen',
         'rcon_enabled_helper' => 'Schakelt realtime gegevens ophalen in (Inventaris, Gezondheid, etc.) via RCON. Vereist dat RCON is ingeschakeld in server.properties.',
+        'rcon_host' => 'RCON Host / IP',
+        'rcon_host_helper' => 'IP-adres of hostnaam voor de RCON-verbinding (voorbeeld: 127.0.0.1).',
+        'rcon_port' => 'RCON Poort',
+        'rcon_port_helper' => 'RCON TCP-poort (standaard: 25575).',
+        'rcon_password' => 'RCON Wachtwoord',
+        'rcon_password_helper' => 'RCON-wachtwoord ingesteld in server.properties of in de serverstartinstellingen.',
         'nav_sort' => 'Navigatievolgorde',
         'nav_sort_helper' => 'Sorteervolgorde in het zijmenu. Lagere nummers staan hoger. (Standaard: 2)',
         'saved' => 'Instellingen succesvol opgeslagen.',

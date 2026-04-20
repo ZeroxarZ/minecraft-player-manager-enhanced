@@ -50,6 +50,21 @@ class GamePlayerManagerPlugin implements Plugin, HasPluginSettings
                 ->label(__('minecraft-player-manager::messages.settings.rcon_enabled'))
                 ->helperText(__('minecraft-player-manager::messages.settings.rcon_enabled_helper'))
                 ->default(env('MC_PLAYER_MANAGER_RCON_ENABLED', false)),
+            \Filament\Forms\Components\TextInput::make('rcon_host')
+                ->label(__('minecraft-player-manager::messages.settings.rcon_host'))
+                ->helperText(__('minecraft-player-manager::messages.settings.rcon_host_helper'))
+                ->default(env('MC_PLAYER_MANAGER_RCON_HOST', '127.0.0.1')),
+            \Filament\Forms\Components\TextInput::make('rcon_port')
+                ->label(__('minecraft-player-manager::messages.settings.rcon_port'))
+                ->helperText(__('minecraft-player-manager::messages.settings.rcon_port_helper'))
+                ->numeric()
+                ->default((int) env('MC_PLAYER_MANAGER_RCON_PORT', 25575)),
+            \Filament\Forms\Components\TextInput::make('rcon_password')
+                ->label(__('minecraft-player-manager::messages.settings.rcon_password'))
+                ->helperText(__('minecraft-player-manager::messages.settings.rcon_password_helper'))
+                ->password()
+                ->revealable()
+                ->default(env('MC_PLAYER_MANAGER_RCON_PASSWORD', '')),
             \Filament\Forms\Components\TextInput::make('nav_sort')
                 ->label(__('minecraft-player-manager::messages.settings.nav_sort'))
                 ->helperText(__('minecraft-player-manager::messages.settings.nav_sort_helper'))
@@ -62,6 +77,9 @@ class GamePlayerManagerPlugin implements Plugin, HasPluginSettings
     {
         $this->writeToEnvironment([
             'MC_PLAYER_MANAGER_RCON_ENABLED' => $data['rcon_enabled'],
+            'MC_PLAYER_MANAGER_RCON_HOST' => trim((string) ($data['rcon_host'] ?? '')),
+            'MC_PLAYER_MANAGER_RCON_PORT' => (int) ($data['rcon_port'] ?? 25575),
+            'MC_PLAYER_MANAGER_RCON_PASSWORD' => (string) ($data['rcon_password'] ?? ''),
             'MC_PLAYER_MANAGER_NAV_SORT' => $data['nav_sort'],
         ]);
 

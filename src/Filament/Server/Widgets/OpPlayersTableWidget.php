@@ -62,7 +62,7 @@ class OpPlayersTableWidget extends BaseWidget
         $all = $provider->getPlayers($serverId);
         
         // Filter OP
-        $ops = array_filter($all, fn($p) => $p['is_op']);
+        $ops = array_filter($all, fn ($p) => !empty($p['is_op']));
         
         return collect($ops)->map(fn($item) => new Player($item));
     }

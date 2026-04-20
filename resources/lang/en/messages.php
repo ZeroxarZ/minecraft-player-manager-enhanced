@@ -116,6 +116,12 @@ return [
     'settings' => [
         'rcon_enabled' => 'Enable RCON / Live Status',
         'rcon_enabled_helper' => 'Enables real-time data fetching (Inventory, Health, etc.) via RCON. Requires RCON to be enabled in server.properties.',
+        'rcon_host' => 'RCON Host / IP',
+        'rcon_host_helper' => 'IP address or hostname used for RCON connection (example: 127.0.0.1).',
+        'rcon_port' => 'RCON Port',
+        'rcon_port_helper' => 'RCON TCP port (default: 25575).',
+        'rcon_password' => 'RCON Password',
+        'rcon_password_helper' => 'RCON password configured in server.properties or your server startup settings.',
         'nav_sort' => 'Navigation Order',
         'nav_sort_helper' => 'Sort order in the side menu. Lower numbers appear higher. (Default: 2)',
         'saved' => 'Settings saved successfully.',

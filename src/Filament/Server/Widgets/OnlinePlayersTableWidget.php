@@ -17,7 +17,7 @@ class OnlinePlayersTableWidget extends BaseWidget
         /** @var \App\Models\Server $server */
         $server = Filament::getTenant();
 
-        return in_array('minecraft', $server->egg->tags ?? []);
+        return $server && in_array('minecraft', $server->egg->tags ?? []);
     }
     protected int | string | array $columnSpan = 'full';
     
@@ -86,7 +86,7 @@ class OnlinePlayersTableWidget extends BaseWidget
         $all = $provider->getPlayers($serverId);
         
         // Filter Online
-        $online = array_filter($all, fn($p) => $p['online']);
+        $online = array_filter($all, fn ($p) => !empty($p['online']));
         
         return collect($online)->map(fn($item) => new Player($item));
     }

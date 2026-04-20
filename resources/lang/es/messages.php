@@ -122,6 +122,12 @@ return [
     'settings' => [
         'rcon_enabled' => 'Habilitar RCON / Estado en vivo',
         'rcon_enabled_helper' => 'Habilita la obtención de datos en tiempo real (inventario, salud, etc.) mediante RCON. Requiere RCON activado en server.properties.',
+        'rcon_host' => 'Host / IP de RCON',
+        'rcon_host_helper' => 'Dirección IP o nombre de host para la conexión RCON (ejemplo: 127.0.0.1).',
+        'rcon_port' => 'Puerto RCON',
+        'rcon_port_helper' => 'Puerto TCP de RCON (predeterminado: 25575).',
+        'rcon_password' => 'Contraseña RCON',
+        'rcon_password_helper' => 'Contraseña RCON configurada en server.properties o en los ajustes de inicio del servidor.',
         'nav_sort' => 'Orden de navegación',
         'nav_sort_helper' => 'Orden en el menú lateral. Los números más bajos aparecen más arriba. (Predeterminado: 2)',
         'saved' => 'Configuración guardada correctamente.',

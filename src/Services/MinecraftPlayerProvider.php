@@ -1,257 +1,160 @@
 <?php
 
-
 namespace KumaGames\GamePlayerManager\Services;
 
 use App\Models\Server;
 use Illuminate\Support\Facades\Log;
-use App\Repositories\Wings\DaemonCommandRepository;
-
 use KumaGames\GamePlayerManager\Services\Nbt\NbtService;
+use Throwable;
 
 class MinecraftPlayerProvider implements GamePlayerService
 {
-    private $nbtService;
+    private NbtService $nbtService;
 
-    public function __construct() {
+    /** @var array<string, array<string, string>> */
+    private array $serverPropertiesCache = [];
+
+    public function __construct()
+    {
         $this->nbtService = new NbtService();
     }
+
     public function sendRconCommand(string $serverId, string $command): ?string
     {
-        $server = Server::where('uuid', $serverId)->first();
+        $server = $this->resolveServer($serverId, true);
         if (!$server) {
-            Log::error("Server not found for UUID: $serverId");
+            Log::error("Server not found for UUID: {$serverId}");
             return null;
         }
 
+        $response = $this->runRconCommand($server, $command);
+        if ($response !== null) {
+            return $response;
+        }
+
+        // Fallback for environments where the panel command proxy still works.
         try {
             $server->send($command);
-            Log::info("Sent command to $serverId: $command");
-            return "Command sent"; 
-        } catch (\Exception $e) {
-            Log::error("Failed to send command to $serverId: " . $e->getMessage());
+            Log::info("Fallback server command sent to {$serverId}: {$command}");
+            return 'Command sent';
+        } catch (Throwable $e) {
+            Log::error("Failed to send command to {$serverId}: {$e->getMessage()}");
             return null;
         }
     }
 
     public function getPlayers(string $serverId): array
     {
-        // Use 'where' for UUID lookup and eager load allocation
-        $server = Server::where('uuid', $serverId)->with('allocation')->first();
+        $server = $this->resolveServer($serverId, true);
         if (!$server) {
             return [];
         }
 
         $allPlayers = [];
+        $fileRepository = $this->getFileRepository($server);
 
-        /** @var \App\Repositories\Daemon\DaemonFileRepository $fileRepository */
-        $fileRepository = app(\App\Repositories\Daemon\DaemonFileRepository::class);
-        $fileRepository->setServer($server);
-
-        // 1. Get List of OPs from ops.json
-        $opNames = [];
-        try {
-            $opsContent = $fileRepository->getContent('ops.json');
-            $ops = json_decode($opsContent, true);
-            if (is_array($ops)) {
-                foreach ($ops as $op) {
-                    $name = $op['name'] ?? null;
-                    if ($name) {
-                        $lowerName = strtolower($name);
-                        $opNames[$lowerName] = true;
-                        // Add to all players list
-                        if (!isset($allPlayers[$lowerName])) {
-                            $allPlayers[$lowerName] = [
-                                'id' => $name,
-                                'name' => $name,
-                                'online' => false,
-                                'is_op' => true,
-                                'is_banned' => false,
-                            ];
-                        } else {
-                            $allPlayers[$lowerName]['is_op'] = true;
-                        }
-                    }
-                }
-            }
-        } catch (\Exception $e) {
-            // Ignore file read errors
+        $opNames = $this->readNamedList($fileRepository, 'ops.json');
+        foreach ($opNames as $lowerName => $name) {
+            $allPlayers[$lowerName] = [
+                'id' => $name,
+                'name' => $name,
+                'online' => false,
+                'is_op' => true,
+                'is_banned' => false,
+            ];
         }
 
-        // 2. Get List of Banned Players from banned-players.json
-        try {
-            $bannedContent = $fileRepository->getContent('banned-players.json');
-            $banned = json_decode($bannedContent, true);
-            if (is_array($banned)) {
-                foreach ($banned as $ban) {
-                    $name = $ban['name'] ?? null;
-                    if ($name) {
-                        $lowerName = strtolower($name);
-                        // Add to all players list
-                        if (!isset($allPlayers[$lowerName])) {
-                            $allPlayers[$lowerName] = [
-                                'id' => $name,
-                                'name' => $name,
-                                'online' => false,
-                                'is_op' => isset($opNames[$lowerName]),
-                                'is_banned' => true,
-                            ];
-                        } else {
-                            $allPlayers[$lowerName]['is_banned'] = true;
-                        }
-                    }
-                }
+        $bannedNames = $this->readNamedList($fileRepository, 'banned-players.json');
+        foreach ($bannedNames as $lowerName => $name) {
+            if (!isset($allPlayers[$lowerName])) {
+                $allPlayers[$lowerName] = [
+                    'id' => $name,
+                    'name' => $name,
+                    'online' => false,
+                    'is_op' => isset($opNames[$lowerName]),
+                    'is_banned' => true,
+                ];
+                continue;
             }
-        } catch (\Exception $e) {
-            // Ignore file read errors
+
+            $allPlayers[$lowerName]['is_banned'] = true;
         }
 
-        // 3. Get List of Known Players from usercache.json (Historical/Offline)
-        try {
-            $cacheContent = $fileRepository->getContent('usercache.json');
-            // DEBUG: Check server.properties for RCON
-            try {
-                $props = $fileRepository->getContent('server.properties');
-                Log::info("DEBUG_SERVER_PROPS: " . substr($props, 0, 500));
-            } catch (\Exception $e) {
-                Log::error("DEBUG_SERVER_PROPS_ERROR: " . $e->getMessage());
+        $cachedPlayers = $this->readJsonFile($fileRepository, 'usercache.json');
+        foreach ($cachedPlayers as $player) {
+            $name = $player['name'] ?? null;
+            if (!is_string($name) || $name === '') {
+                continue;
             }
 
-            $cachedPlayers = json_decode($cacheContent, true);
-            if (is_array($cachedPlayers)) {
-                foreach ($cachedPlayers as $player) {
-                    $name = $player['name'] ?? null;
-                    if ($name) {
-                        $lowerName = strtolower($name);
-                        // Add to all players list if not exists
-                        // If exists, it means they are OP or Banned already, so we just skip updating status
-                        if (!isset($allPlayers[$lowerName])) {
-                            $allPlayers[$lowerName] = [
-                                'id' => $name,
-                                'name' => $name,
-                                'online' => false,
-                                'is_op' => isset($opNames[$lowerName]),
-                                'is_banned' => false,
-                            ];
-                        }
-                    }
-                }
+            $lowerName = strtolower($name);
+            if (isset($allPlayers[$lowerName])) {
+                continue;
             }
-        } catch (\Exception $e) {
-            // usercache.json might not exist on new servers
+
+            $allPlayers[$lowerName] = [
+                'id' => $name,
+                'name' => $name,
+                'online' => false,
+                'is_op' => isset($opNames[$lowerName]),
+                'is_banned' => isset($bannedNames[$lowerName]),
+            ];
         }
 
-        // 4. Online Players via Query
-        $onlinePlayers = $this->getOnlinePlayersViaQuery($server);
+        $onlinePlayers = $this->getOnlinePlayers($server);
         foreach ($onlinePlayers as $playerName) {
             $lowerName = strtolower($playerName);
-            if (isset($allPlayers[$lowerName])) {
-                $allPlayers[$lowerName]['online'] = true;
-            } else {
+
+            if (!isset($allPlayers[$lowerName])) {
                 $allPlayers[$lowerName] = [
                     'id' => $playerName,
                     'name' => $playerName,
                     'online' => true,
                     'is_op' => isset($opNames[$lowerName]),
-                    'is_banned' => false,
+                    'is_banned' => isset($bannedNames[$lowerName]),
                 ];
+                continue;
             }
+
+            $allPlayers[$lowerName]['online'] = true;
         }
 
-        return array_values($allPlayers);
-    }
+        $players = array_values($allPlayers);
+        usort($players, fn (array $a, array $b) => strcasecmp((string) ($a['name'] ?? ''), (string) ($b['name'] ?? '')));
 
-    private function getOnlinePlayersViaQuery(Server $server): array
-    {
-        $players = [];
-        try {
-            $ip = $server->allocation->alias ?? $server->allocation->ip;
-            $port = $server->allocation->port;
-
-             $socket = fsockopen("udp://$ip", $port, $errno, $errstr, 2);
-             if ($socket) {
-                 stream_set_timeout($socket, 2);
-                 
-                 // Request Challenge
-                 $sessionId = rand(1, 99999999) & 0x0F0F0F0F;
-                 $payload = pack('c', 0xFE) . pack('c', 0xFD) . pack('c', 0x09) . pack('N', $sessionId);
-                 fwrite($socket, $payload);
-                 
-                 $response = fread($socket, 4096);
-                 if ($response) {
-                     $challengeStr = substr($response, 5);
-                     $challengeStr = trim($challengeStr); 
-                     $challenge = (int) $challengeStr;
-
-                     // Full Stat Request
-                     $payload2 = pack('c', 0xFE) . pack('c', 0xFD) . pack('c', 0x00) . 
-                                 pack('N', $sessionId) . 
-                                 pack('N', $challenge) . 
-                                 pack('N', 0x00); 
-                     
-                     fwrite($socket, $payload2);
-                     $fullResponse = fread($socket, 4096);
-                     
-                     if ($fullResponse) {
-                         $body = substr($fullResponse, 16);
-                         $split = explode("\x00\x01player_\x00\x00", $body);
-                         
-                         if (count($split) > 1) {
-                            $playerSection = $split[1];
-                            $rawPlayers = explode("\x00", $playerSection);
-
-                            foreach ($rawPlayers as $playerName) {
-                                if (!empty($playerName)) {
-                                    $players[] = $playerName;
-                                }
-                            }
-                        }
-                     }
-                 }
-                 fclose($socket);
-             }
-        } catch (\Exception $e) {
-            // Query failed
-        }
         return $players;
     }
 
     public function getPlayerDetails(string $serverId, string $playerId): array
     {
-        $server = Server::where('uuid', $serverId)->orWhere('uuid_short', $serverId)->first();
-        if (!$server) return [];
-        
-        // Resolve UUID from Username early (Need UUID for stats file and UI)
-        $uuid = null;
-        /** @var \App\Repositories\Daemon\DaemonFileRepository $fileRepository */
-        $fileRepository = app(\App\Repositories\Daemon\DaemonFileRepository::class);
-        $fileRepository->setServer($server);
-        
-        try {
-            $cacheContent = $fileRepository->getContent('usercache.json');
-            $cache = json_decode($cacheContent, true);
-            if (is_array($cache)) {
-                foreach ($cache as $entry) {
-                    if (strtolower($entry['name']) === strtolower($playerId)) {
-                        $uuid = $entry['uuid'];
-                        break;
-                    }
-                }
-            }
-        } catch (\Exception $e) { /* Ignore */ }
+        $server = $this->resolveServer($serverId, true);
+        if (!$server) {
+            return [];
+        }
+
+        $fileRepository = $this->getFileRepository($server);
+        $uuid = $this->resolveUuidFromUsercache($fileRepository, $playerId);
+        $lowerPlayerId = strtolower($playerId);
+
+        $opNames = $this->readNamedList($fileRepository, 'ops.json');
+        $bannedNames = $this->readNamedList($fileRepository, 'banned-players.json');
+
+        $onlinePlayers = array_map('strtolower', $this->getOnlinePlayers($server));
+        $isOnline = in_array($lowerPlayerId, $onlinePlayers, true);
 
         $details = [
+            'id' => $playerId,
             'name' => $playerId,
             'uuid' => $uuid ?? 'Unknown',
-            'status' => 'Offline', // Default
-            'is_op' => false,
-            'is_op' => false,
-            'is_banned' => false,
-            'raw_stats' => 'RCON disabled or unavailable.',
+            'status' => $isOnline ? 'Online' : 'Offline',
+            'is_op' => isset($opNames[$lowerPlayerId]),
+            'is_banned' => isset($bannedNames[$lowerPlayerId]),
+            'raw_stats' => $isOnline ? 'Online' : 'Offline',
             'health' => null,
             'food' => null,
             'level' => null,
             'gamemode' => null,
+            'inventory_data' => [],
             'inventory_summary' => null,
             'play_time' => null,
             'walk_distance' => null,
@@ -259,429 +162,702 @@ class MinecraftPlayerProvider implements GamePlayerService
             'deaths' => null,
         ];
 
-        // Check OP status
-        try {
-            $opsContent = $fileRepository->getContent('ops.json');
-            $ops = json_decode($opsContent, true);
-            if (is_array($ops)) {
-                foreach ($ops as $op) {
-                    if (strtolower($op['name'] ?? '') === strtolower($playerId)) {
-                        $details['is_op'] = true;
-                        break;
-                    }
-                }
+        if ($this->isRconEnabled()) {
+            $liveDetails = $this->getLiveDetailsViaRcon($server, $playerId);
+            if ($liveDetails !== null) {
+                $details = array_merge($details, $liveDetails);
             }
-        } catch (\Exception $e) { /* Ignore */ }
-
-        // Check Banned status
-        try {
-            $bannedContent = $fileRepository->getContent('banned-players.json');
-            $banned = json_decode($bannedContent, true);
-            if (is_array($banned)) {
-                foreach ($banned as $ban) {
-                    if (strtolower($ban['name'] ?? '') === strtolower($playerId)) {
-                        $details['is_banned'] = true;
-                        break;
-                    }
-                }
-            }
-        } catch (\Exception $e) { /* Ignore */ }
-        
-        
-        // 1. Get RCON Credentials
-        $rconPort = null;
-        $rconPassword = null;
-        $enableRcon = false;
-
-        try {
-            $propsContent = $fileRepository->getContent('server.properties');
-            
-            // Regex Parsing for robustness
-            if (preg_match('/^\s*enable-rcon\s*=\s*(true|false)/m', $propsContent, $m)) {
-                $enableRcon = $m[1] === 'true';
-            }
-            if (preg_match('/^\s*rcon\.port\s*=\s*(\d+)/m', $propsContent, $m)) {
-                $rconPort = (int)$m[1];
-            }
-            if (preg_match('/^\s*rcon\.password\s*=\s*(.*)$/m', $propsContent, $m)) {
-                $rconPassword = trim($m[1]);
-            } else {
-                 // Debug why regex failed
-                 $lines = explode("\n", $propsContent);
-                 $passLine = array_values(array_filter($lines, fn($l) => str_contains($l, 'rcon.password')));
-                 \Illuminate\Support\Facades\Log::info("DEBUG RCON PASSWORD LINE: " . json_encode($passLine));
-            }
-            
-        } catch (\Exception $e) {
-            // Failed to read properties
-        }
-
-        $primaryHost = $server->allocation->alias ?? $server->allocation->ip;
-        $hasPass = !empty($rconPassword);
-
-
-        
-        // Check setting
-        $rconEnabled = env('MC_PLAYER_MANAGER_RCON_ENABLED', false);
-
-        if (!$rconEnabled) {
-             // Try to get status via Query even if RCON is disabled
-             $onlinePlayers = $this->getOnlinePlayersViaQuery($server);
-             $isOnline = false;
-             foreach ($onlinePlayers as $p) {
-                 if (strtolower($p) === strtolower($playerId)) {
-                     $isOnline = true;
-                     break;
-                 }
-             }
-             
-             $details['status'] = $isOnline ? 'Online' : 'Offline';
-             $details['raw_stats'] = $isOnline 
-                ? 'Online (RCON disabled)' 
-                : 'Offline';
-
-             // Always try NBT if RCON is disabled (User request)
-             $nbtDetails = $this->getOfflineDetailsFromNbt($server, $uuid ?? $playerId);
-             if ($nbtDetails) {
-                 $details = array_merge($details, $nbtDetails);
-                 $details['raw_stats'] = 'RconDisabled';
-             }
-        } elseif (!$enableRcon || !$rconPort || !$hasPass) {
-            $details['raw_stats'] = 'RCON is not enabled in server.properties.';
-            $details['status'] = 'Config Error';
         } else {
-             // 2. Connect RCON
-            $hostsToTry = array_unique([$primaryHost, '127.0.0.1', 'localhost']);
-            
-            $connected = false;
-            $lastError = '';
-            $rcon = null; // Initialize $rcon outside the loop
-
-            foreach ($hostsToTry as $host) {
-                if (empty($host)) continue;
-                
-                \Illuminate\Support\Facades\Log::info("RCON Attempt: Host={$host}, Port={$rconPort}");
-                
-                $rcon = new RconService($host, $rconPort, $rconPassword, 3); // Changed timeout to 3
-                if ($rcon->connect()) {
-                    $connected = true;
-                    \Illuminate\Support\Facades\Log::info("RCON Connected successfully to {$host}");
-                    break;
-                }
-                // Log failure only if all fail, or rely on RconService logs
-            }
-            
-                if ($rcon->connect()) {
-                    $connected = true;
-                    // Check if online first by checking root
-                    // But actually, asking for a specific path directly is fine. If entity not found, it returns "No entity..."
-                    
-                    // 3. Fetch Data Individually for robustness
-                    $details['status'] = 'Online'; // Assume online if connected and commands work, will verify below
-                    
-                    // Helper to fetch and parse simpler numbers
-                    $fetchInt = function($path) use ($rcon, $playerId) {
-                        $res = $rcon->sendCommand("data get entity $playerId $path");
-                        // Response: "<uuid> has the following entity data: 123" or just "123" depending on server
-                        // Regex to grab the last number in the string
-                        if (preg_match('/(-?\d+)[bfsdL]?$/', trim($res), $m)) return (int)$m[1];
-                        return null;
-                    };
-                    $fetchFloat = function($path) use ($rcon, $playerId) {
-                        $res = $rcon->sendCommand("data get entity $playerId $path");
-                        if (preg_match('/([\d\.]+)[bfsdL]?$/', trim($res), $m)) return (float)$m[1];
-                        return null;
-                    };
-
-                    // Health
-                    // Try "Health" first, then "HealF"
-                    $h = $fetchFloat('Health');
-                    if ($h === null) $h = $fetchFloat('HealF'); // fallback
-                    if ($h !== null) $details['health'] = $h;
-                    
-                    // Food
-                    // Try "foodLevel" (camel), then "FoodLevel" (Pascal)
-                    $f = $fetchInt('foodLevel');
-                    if ($f === null) $f = $fetchInt('FoodLevel');
-                    if ($f !== null) $details['food'] = $f;
-
-                    // XP Level
-                    $xl = $fetchInt('XpLevel'); 
-                    if ($xl === null) $xl = $fetchInt('xpLevel');
-                    if ($xl === null) {
-                         // Fallback to XpTotal if level missing? No, that's different.
-                         // Maybe "lev" (unlikely)
-                    }
-                    if ($xl !== null) $details['level'] = $xl;
-
-                    // Gamemode
-                    $gmVal = $fetchInt('playerGameType');
-                    if ($gmVal !== null) {
-                        $gmById = [0 => 'Survival', 1 => 'Creative', 2 => 'Adventure', 3 => 'Spectator'];
-                        $details['gamemode'] = $gmById[$gmVal] ?? 'Unknown';
-                    } else {
-                        // Try "gamemode" just in case? Usually playerGameType
-                    }
-
-                    // Inventory
-                    // Inventory
-                    // Fetch items iteratively to handle RCON truncation limits (4KB)
-                    // Large inventories with NBT tags often exceed the limit, causing data loss.
-                    // We loop through Inventory[0], Inventory[1]... until we get an error or empty result.
-                    
-                    $inventory = [];
-                    $maxItems = 50; // Safety limit (Players typically have max 41 items: 36 main + 4 armor + 1 offhand)
-                    
-                    for ($i = 0; $i < $maxItems; $i++) {
-                        $itemRes = $rcon->sendCommand("data get entity $playerId Inventory[$i]");
-                        
-                        // Break if index doesn't exist (e.g. "No such element", "Found no elements")
-                        if (!$itemRes || str_contains($itemRes, 'No such element') || str_contains($itemRes, 'Found no elements') || str_contains($itemRes, 'No entity was found')) {
-                            break;
-                        }
-
-                        // Response format: "<player> has the following entity data: {id:..., Count:...}"
-                        // extract the part after "data: "
-                        $dataPos = strpos($itemRes, 'data: ');
-                        $itemStr = ($dataPos !== false) ? substr($itemRes, $dataPos + 6) : $itemRes;
-                        
-                        $item = [];
-                        
-                        // ID
-                        if (preg_match('/id:\s*"?(?:minecraft:)?([^",\}\s]+)"?/i', $itemStr, $kv)) {
-                            $item['id'] = trim($kv[1]);
-                        }
-                        
-                        // Count
-                        if (preg_match('/Count:\s*(\d+)b?/i', $itemStr, $kv)) {
-                            $item['count'] = (int)$kv[1];
-                        } else {
-                            $item['count'] = 1;
-                        }
-                        
-                        // Slot
-                        if (preg_match('/Slot:\s*(\d+)b?/i', $itemStr, $kv)) {
-                            $item['slot'] = (int)$kv[1];
-                        }
-
-                        if (isset($item['id']) && isset($item['slot'])) {
-                            $inventory[] = $item;
-                            // Debug log for checking correct parsing
-                             if ($i < 3) \Illuminate\Support\Facades\Log::info("DEBUG INV Correctly Parsed Index $i: {$item['id']} (Slot {$item['slot']})");
-                        }
-                    }
-
-                    $details['inventory_data'] = $inventory;
-                    \Illuminate\Support\Facades\Log::info("PARSED INVENTORY ITEMS (Iterative): " . count($inventory));
-                    
-                    // Verify if we actually got data, otherwise might be offline (entity not found)
-                    // If all values are null/empty, likely offline or bad UUID
-                    if ($h === null && $f === null && $gmVal === null) {
-                         // Check raw response of one command to see if "No entity"
-                         $check = $rcon->sendCommand("data get entity $playerId Health");
-                         if (str_contains($check, 'No entity') || str_contains($check, 'No player')) {
-                             $details['status'] = 'Offline'; 
-                             $details['raw_stats'] = "Player is Offline";
-                             
-                             // Fallback to NBT
-                             $nbtDetails = $this->getOfflineDetailsFromNbt($server, $uuid ?? $playerId);
-                             if ($nbtDetails) {
-                                 $details = array_merge($details, $nbtDetails);
-                                 $details['raw_stats'] = 'Offline (Data from Save File)';
-                             }
-                         }
-                    }
-
-                    $rcon->disconnect();
-                } else {
-                     // Connect failed (logged in loop)
-                     $details['status'] = 'RCON Error';
-                }
-             }
-
-        // 4. Fetch JSON Stats
-        if ($uuid) {
-            try {
-                $levelName = 'world';
-                if (isset($propsContent) && preg_match('/level-name=(.*)/', $propsContent, $lm)) {
-                    $levelName = trim($lm[1]);
-                }
-                
-                $statsPath = "$levelName/stats/$uuid.json";
-                $statsContent = $fileRepository->getContent($statsPath);
-                $statsJson = json_decode($statsContent, true);
-                
-                if ($statsJson && isset($statsJson['stats'])) {
-                    $s = $statsJson['stats'];
-                    $ticks = $s['minecraft:custom']['minecraft:play_time'] ?? 0;
-                    $details['play_time'] = floor($ticks / 20 / 60) . ' ' . __('minecraft-player-manager::messages.units.mins');
-                    $details['mobs_killed'] = $s['minecraft:custom']['minecraft:mob_kills'] ?? 0;
-                    $details['deaths'] = $s['minecraft:custom']['minecraft:deaths'] ?? 0;
-                    $cm = $s['minecraft:custom']['minecraft:walk_one_cm'] ?? 0;
-                    $details['walk_distance'] = floor($cm / 100) . ' m';
-                }
-            } catch (\Exception $e) { /* Stat file parse error */ }
+            $details['raw_stats'] = $isOnline ? 'Online (RCON disabled)' : 'Offline';
         }
+
+        if (($details['status'] ?? 'Offline') !== 'Online') {
+            $nbtDetails = $this->getOfflineDetailsFromNbt($server, $uuid ?? $playerId);
+            if (!empty($nbtDetails)) {
+                $details = array_merge($details, $nbtDetails);
+                $details['raw_stats'] = $this->isRconEnabled()
+                    ? 'Offline (Data from Save File)'
+                    : 'RconDisabled';
+            }
+        }
+
+        $this->fillStatsFromJson($fileRepository, $server, $uuid, $details);
 
         return $details;
     }
 
     public function kick(string $serverId, string $playerId, string $reason = ''): bool
     {
-        $cmd = trim("kick $playerId $reason");
+        $cmd = trim("kick {$playerId} {$reason}");
         return $this->sendRconCommand($serverId, $cmd) !== null;
     }
 
     public function ban(string $serverId, string $playerId, string $reason = ''): bool
     {
-        $cmd = "ban $playerId";
-        if (!empty($reason)) {
-            $cmd .= " $reason";
+        $cmd = "ban {$playerId}";
+        if ($reason !== '') {
+            $cmd .= " {$reason}";
         }
+
         return $this->sendRconCommand($serverId, $cmd) !== null;
     }
 
     public function pardon(string $serverId, string $playerId): bool
     {
-        return $this->sendRconCommand($serverId, "pardon $playerId") !== null;
+        return $this->sendRconCommand($serverId, "pardon {$playerId}") !== null;
     }
 
     public function op(string $serverId, string $playerId): bool
     {
-        return $this->sendRconCommand($serverId, "op $playerId") !== null;
+        return $this->sendRconCommand($serverId, "op {$playerId}") !== null;
     }
 
     public function deop(string $serverId, string $playerId): bool
     {
-        return $this->sendRconCommand($serverId, "deop $playerId") !== null;
+        return $this->sendRconCommand($serverId, "deop {$playerId}") !== null;
     }
 
     public function clearInventory(string $serverId, string $playerId): bool
     {
-        return $this->sendRconCommand($serverId, "clear $playerId") !== null;
+        return $this->sendRconCommand($serverId, "clear {$playerId}") !== null;
     }
 
     public function getServerProperties(string $serverId): array
     {
-        $server = Server::where('uuid', $serverId)->orWhere('uuid_short', $serverId)->first();
-        if (!$server) return [];
+        $server = $this->resolveServer($serverId, true);
+        if (!$server) {
+            return [];
+        }
 
+        $rawProps = $this->getServerPropertiesFromFile($server);
+        $maxPlayers = isset($rawProps['max-players']) ? (int) $rawProps['max-players'] : 20;
+        $motdRaw = trim((string) ($rawProps['motd'] ?? 'A Minecraft Server'));
+        $levelName = trim((string) ($rawProps['level-name'] ?? 'world'));
+
+        return [
+            'max_players' => $maxPlayers,
+            'motd' => $this->decodeMotd($motdRaw),
+            'level_name' => $levelName !== '' ? $levelName : 'world',
+        ];
+    }
+
+    private function getOnlinePlayers(Server $server): array
+    {
+        $onlineByRcon = [];
+        if ($this->isRconEnabled()) {
+            $onlineByRcon = $this->getOnlinePlayersViaRcon($server);
+        }
+
+        if (!empty($onlineByRcon)) {
+            return $onlineByRcon;
+        }
+
+        return $this->getOnlinePlayersViaQuery($server);
+    }
+
+    private function getOnlinePlayersViaRcon(Server $server): array
+    {
+        $response = $this->runRconCommand($server, 'list');
+        if ($response === null || trim($response) === '') {
+            return [];
+        }
+
+        if (!str_contains($response, ':')) {
+            return [];
+        }
+
+        $playerListString = trim((string) substr(strrchr($response, ':'), 1));
+        if ($playerListString === '') {
+            return [];
+        }
+
+        $players = [];
+        foreach (explode(',', $playerListString) as $name) {
+            $clean = trim((string) preg_replace('/§[0-9A-FK-OR]/i', '', $name));
+            if ($clean !== '') {
+                $players[] = $clean;
+            }
+        }
+
+        return array_values(array_unique($players));
+    }
+
+    private function getOnlinePlayersViaQuery(Server $server): array
+    {
+        $players = [];
+
+        try {
+            if (!$server->relationLoaded('allocation')) {
+                $server->load('allocation');
+            }
+
+            if (!$server->allocation) {
+                return [];
+            }
+
+            $ip = $server->allocation->alias ?: $server->allocation->ip;
+            $port = (int) $server->allocation->port;
+
+            if (empty($ip) || $port <= 0) {
+                return [];
+            }
+
+            $socket = @fsockopen("udp://{$ip}", $port, $errno, $errstr, 2);
+            if (!$socket) {
+                return [];
+            }
+
+            stream_set_timeout($socket, 2);
+
+            $sessionId = random_int(1, 99999999) & 0x0F0F0F0F;
+            $challengeRequest = pack('c', 0xFE) . pack('c', 0xFD) . pack('c', 0x09) . pack('N', $sessionId);
+            fwrite($socket, $challengeRequest);
+
+            $challengeResponse = fread($socket, 4096);
+            if (!$challengeResponse || strlen($challengeResponse) < 6) {
+                fclose($socket);
+                return [];
+            }
+
+            $challenge = (int) trim((string) substr($challengeResponse, 5));
+
+            $statRequest = pack('c', 0xFE) . pack('c', 0xFD) . pack('c', 0x00)
+                . pack('N', $sessionId)
+                . pack('N', $challenge)
+                . pack('N', 0x00);
+
+            fwrite($socket, $statRequest);
+            $fullResponse = fread($socket, 4096);
+            fclose($socket);
+
+            if (!$fullResponse || strlen($fullResponse) < 17) {
+                return [];
+            }
+
+            $body = substr($fullResponse, 16);
+            $split = explode("\x00\x01player_\x00\x00", $body);
+            if (count($split) < 2) {
+                return [];
+            }
+
+            foreach (explode("\x00", $split[1]) as $playerName) {
+                $playerName = trim($playerName);
+                if ($playerName !== '') {
+                    $players[] = $playerName;
+                }
+            }
+        } catch (Throwable $e) {
+            // Query can fail depending on firewall/network settings.
+            Log::debug('Minecraft query failed: ' . $e->getMessage());
+        }
+
+        return array_values(array_unique($players));
+    }
+
+    private function getLiveDetailsViaRcon(Server $server, string $playerId): ?array
+    {
+        $result = $this->withRcon($server, function (RconService $rcon) use ($playerId) {
+            $healthResponse = $rcon->sendCommand("data get entity {$playerId} Health");
+            if ($healthResponse === null) {
+                return null;
+            }
+
+            if ($this->isNoEntityResponse($healthResponse)) {
+                return [
+                    'status' => 'Offline',
+                    'raw_stats' => 'Player is Offline',
+                ];
+            }
+
+            $details = [
+                'status' => 'Online',
+                'raw_stats' => 'Live RCON',
+            ];
+
+            $details['health'] = $this->extractFloatFromRconResponse($healthResponse);
+
+            $foodResponse = $rcon->sendCommand("data get entity {$playerId} foodLevel");
+            if ($foodResponse === null || $this->isNoEntityResponse($foodResponse)) {
+                $foodResponse = $rcon->sendCommand("data get entity {$playerId} FoodLevel");
+            }
+            $details['food'] = $this->extractIntFromRconResponse($foodResponse);
+
+            $levelResponse = $rcon->sendCommand("data get entity {$playerId} XpLevel");
+            if ($levelResponse === null || $this->isNoEntityResponse($levelResponse)) {
+                $levelResponse = $rcon->sendCommand("data get entity {$playerId} xpLevel");
+            }
+            $details['level'] = $this->extractIntFromRconResponse($levelResponse);
+
+            $gamemodeResponse = $rcon->sendCommand("data get entity {$playerId} playerGameType");
+            $gamemodeValue = $this->extractIntFromRconResponse($gamemodeResponse);
+            if ($gamemodeValue !== null) {
+                $gamemodeById = [
+                    0 => 'Survival',
+                    1 => 'Creative',
+                    2 => 'Adventure',
+                    3 => 'Spectator',
+                ];
+                $details['gamemode'] = $gamemodeById[$gamemodeValue] ?? 'Unknown';
+            }
+
+            $details['inventory_data'] = $this->fetchInventoryViaRcon($rcon, $playerId);
+
+            return $details;
+        });
+
+        return is_array($result) ? $result : null;
+    }
+
+    private function fetchInventoryViaRcon(RconService $rcon, string $playerId): array
+    {
+        $inventory = [];
+
+        for ($i = 0; $i < 50; $i++) {
+            $itemResponse = $rcon->sendCommand("data get entity {$playerId} Inventory[{$i}]");
+
+            if ($itemResponse === null || $this->isNoEntityResponse($itemResponse)) {
+                break;
+            }
+
+            if (str_contains($itemResponse, 'No such element') || str_contains($itemResponse, 'Found no elements')) {
+                break;
+            }
+
+            $itemString = $itemResponse;
+            $dataPos = strpos($itemResponse, 'data: ');
+            if ($dataPos !== false) {
+                $itemString = substr($itemResponse, $dataPos + 6);
+            }
+
+            $item = [];
+
+            if (preg_match('/id:\s*"?(?:minecraft:)?([^",\}\s]+)"?/i', $itemString, $idMatch)) {
+                $item['id'] = trim($idMatch[1]);
+            }
+
+            if (preg_match('/Count:\s*(-?\d+)b?/i', $itemString, $countMatch)) {
+                $item['count'] = (int) $countMatch[1];
+            } else {
+                $item['count'] = 1;
+            }
+
+            if (preg_match('/Slot:\s*(-?\d+)b?/i', $itemString, $slotMatch)) {
+                $item['slot'] = (int) $slotMatch[1];
+            }
+
+            if (isset($item['id'], $item['slot'])) {
+                $inventory[] = $item;
+            }
+        }
+
+        return $inventory;
+    }
+
+    private function runRconCommand(Server $server, string $command): ?string
+    {
+        $result = $this->withRcon($server, function (RconService $rcon) use ($command) {
+            $response = $rcon->sendCommand($command);
+            return $response ?? '';
+        });
+
+        if ($result === null) {
+            return null;
+        }
+
+        return (string) $result;
+    }
+
+    private function withRcon(Server $server, callable $callback)
+    {
+        if (!$this->isRconEnabled()) {
+            return null;
+        }
+
+        $config = $this->getRconConfig($server);
+        if ((int) $config['port'] <= 0 || trim((string) $config['password']) === '') {
+            Log::warning('RCON config is incomplete (missing port/password).');
+            return null;
+        }
+
+        if ($config['server_rcon_enabled'] === false) {
+            Log::warning('RCON disabled in server.properties (enable-rcon=false).');
+            return null;
+        }
+
+        $hosts = $this->getRconHostsToTry($server, $config);
+        $lastError = '';
+
+        foreach ($hosts as $host) {
+            $rcon = new RconService($host, (int) $config['port'], (string) $config['password'], 3);
+            if (!$rcon->connect()) {
+                $lastError = $rcon->getLastError();
+                continue;
+            }
+
+            try {
+                return $callback($rcon);
+            } catch (Throwable $e) {
+                Log::error("RCON command failed on {$host}: {$e->getMessage()}");
+                return null;
+            } finally {
+                $rcon->disconnect();
+            }
+        }
+
+        if ($lastError !== '') {
+            Log::error('All RCON hosts failed: ' . $lastError);
+        }
+
+        return null;
+    }
+
+    private function getRconConfig(Server $server): array
+    {
+        $properties = $this->getServerPropertiesFromFile($server);
+
+        $configuredHost = trim((string) env('MC_PLAYER_MANAGER_RCON_HOST', ''));
+        $configuredPort = (int) env('MC_PLAYER_MANAGER_RCON_PORT', 0);
+        $configuredPassword = trim((string) env('MC_PLAYER_MANAGER_RCON_PASSWORD', ''));
+
+        $host = $configuredHost;
+        if ($host === '') {
+            $host = (string) ($server->allocation->alias ?: $server->allocation->ip ?: '127.0.0.1');
+        }
+
+        $portFromProperties = isset($properties['rcon.port']) ? (int) $properties['rcon.port'] : 0;
+        $port = $configuredPort > 0 ? $configuredPort : ($portFromProperties > 0 ? $portFromProperties : 25575);
+
+        $password = $configuredPassword;
+        if ($password === '') {
+            $password = trim((string) ($properties['rcon.password'] ?? ''));
+        }
+
+        $serverRconEnabled = null;
+        if (isset($properties['enable-rcon'])) {
+            $serverRconEnabled = strtolower(trim((string) $properties['enable-rcon'])) === 'true';
+        }
+
+        return [
+            'host' => $host,
+            'configured_host' => $configuredHost !== '',
+            'port' => $port,
+            'password' => $password,
+            'server_rcon_enabled' => $serverRconEnabled,
+        ];
+    }
+
+    /**
+     * @param array{host:string, configured_host:bool, port:int, password:string, server_rcon_enabled:?bool} $config
+     * @return array<int, string>
+     */
+    private function getRconHostsToTry(Server $server, array $config): array
+    {
+        if ($config['configured_host']) {
+            return [$config['host']];
+        }
+
+        $hosts = [
+            $config['host'],
+            $server->allocation->alias ?? null,
+            $server->allocation->ip ?? null,
+            '127.0.0.1',
+            'localhost',
+        ];
+
+        return array_values(array_unique(array_filter($hosts, static function ($host) {
+            return is_string($host) && trim($host) !== '';
+        })));
+    }
+
+    private function isRconEnabled(): bool
+    {
+        $value = env('MC_PLAYER_MANAGER_RCON_ENABLED', false);
+
+        if (is_bool($value)) {
+            return $value;
+        }
+
+        return in_array(strtolower((string) $value), ['1', 'true', 'yes', 'on'], true);
+    }
+
+    private function resolveServer(string $serverId, bool $withAllocation = false): ?Server
+    {
+        $query = Server::query();
+
+        if ($withAllocation) {
+            $query->with('allocation');
+        }
+
+        return $query->where('uuid', $serverId)->orWhere('uuid_short', $serverId)->first();
+    }
+
+    private function getFileRepository(Server $server)
+    {
         /** @var \App\Repositories\Daemon\DaemonFileRepository $fileRepository */
         $fileRepository = app(\App\Repositories\Daemon\DaemonFileRepository::class);
         $fileRepository->setServer($server);
 
-        $props = [
-            'max_players' => 20,
-            'motd' => 'A Minecraft Server',
-            'level_name' => 'world',
-        ];
+        return $fileRepository;
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function readNamedList($fileRepository, string $path): array
+    {
+        $entries = $this->readJsonFile($fileRepository, $path);
+        $names = [];
+
+        foreach ($entries as $entry) {
+            $name = $entry['name'] ?? null;
+            if (!is_string($name) || $name === '') {
+                continue;
+            }
+
+            $names[strtolower($name)] = $name;
+        }
+
+        return $names;
+    }
+
+    private function resolveUuidFromUsercache($fileRepository, string $playerId): ?string
+    {
+        $entries = $this->readJsonFile($fileRepository, 'usercache.json');
+        $lowerPlayerId = strtolower($playerId);
+
+        foreach ($entries as $entry) {
+            $name = $entry['name'] ?? null;
+            $uuid = $entry['uuid'] ?? null;
+
+            if (!is_string($name) || !is_string($uuid)) {
+                continue;
+            }
+
+            if (strtolower($name) === $lowerPlayerId) {
+                return $uuid;
+            }
+        }
+
+        return null;
+    }
+
+    private function fillStatsFromJson($fileRepository, Server $server, ?string $uuid, array &$details): void
+    {
+        if (!$uuid) {
+            return;
+        }
+
+        $properties = $this->getServerPropertiesFromFile($server);
+        $levelName = trim((string) ($properties['level-name'] ?? 'world'));
+        if ($levelName === '') {
+            $levelName = 'world';
+        }
+
+        $statsPath = "{$levelName}/stats/{$uuid}.json";
+        $statsJson = $this->readJsonFile($fileRepository, $statsPath);
+        if (empty($statsJson['stats']) || !is_array($statsJson['stats'])) {
+            return;
+        }
+
+        $custom = $statsJson['stats']['minecraft:custom'] ?? [];
+        if (!is_array($custom)) {
+            return;
+        }
+
+        $ticks = (int) ($custom['minecraft:play_time'] ?? 0);
+        $details['play_time'] = floor($ticks / 20 / 60) . ' ' . __('minecraft-player-manager::messages.units.mins');
+        $details['mobs_killed'] = (int) ($custom['minecraft:mob_kills'] ?? 0);
+        $details['deaths'] = (int) ($custom['minecraft:deaths'] ?? 0);
+
+        $walkCm = (int) ($custom['minecraft:walk_one_cm'] ?? 0);
+        $details['walk_distance'] = floor($walkCm / 100) . ' m';
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function readJsonFile($fileRepository, string $path): array
+    {
+        try {
+            $content = $fileRepository->getContent($path);
+            $decoded = json_decode($content, true);
+            return is_array($decoded) ? $decoded : [];
+        } catch (Throwable $e) {
+            return [];
+        }
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function getServerPropertiesFromFile(Server $server): array
+    {
+        $cacheKey = (string) ($server->uuid ?? spl_object_hash($server));
+
+        if (isset($this->serverPropertiesCache[$cacheKey])) {
+            return $this->serverPropertiesCache[$cacheKey];
+        }
+
+        $properties = [];
 
         try {
-            $content = $fileRepository->getContent('server.properties');
-            
-            if (preg_match('/^\s*max-players\s*=\s*(\d+)/m', $content, $m)) {
-                $props['max_players'] = (int)$m[1];
-            }
-            if (preg_match('/^\s*motd\s*=\s*(.*)$/m', $content, $m)) {
-                $rawMotd = trim($m[1]);
-                // Handle basic unicode escape if present
-                $props['motd'] = json_decode('"'.$rawMotd.'"') ?? $rawMotd;
-            }
-            if (preg_match('/^\s*level-name\s*=\s*(.*)$/m', $content, $m)) {
-                $props['level_name'] = trim($m[1]);
+            $content = $this->getFileRepository($server)->getContent('server.properties');
+            $properties = $this->parseServerProperties($content);
+        } catch (Throwable $e) {
+            // Keep defaults when server.properties is unavailable.
+        }
+
+        $this->serverPropertiesCache[$cacheKey] = $properties;
+
+        return $properties;
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function parseServerProperties(string $content): array
+    {
+        $properties = [];
+
+        foreach (preg_split('/\r\n|\r|\n/', $content) as $line) {
+            if (!is_string($line)) {
+                continue;
             }
 
-        } catch (\Exception $e) { /* Ignore */ }
+            $line = trim($line);
+            if ($line === '' || str_starts_with($line, '#') || !str_contains($line, '=')) {
+                continue;
+            }
 
-        return $props;
+            [$key, $value] = explode('=', $line, 2);
+            $properties[trim($key)] = trim($value);
+        }
+
+        return $properties;
+    }
+
+    private function decodeMotd(string $motd): string
+    {
+        if ($motd === '') {
+            return 'A Minecraft Server';
+        }
+
+        $decoded = json_decode('"' . addslashes($motd) . '"');
+        return is_string($decoded) ? $decoded : $motd;
+    }
+
+    private function extractIntFromRconResponse(?string $response): ?int
+    {
+        if (!is_string($response) || $this->isNoEntityResponse($response)) {
+            return null;
+        }
+
+        if (!preg_match('/(-?\d+)(?:[bBsSfFdDlL])?$/', trim($response), $match)) {
+            return null;
+        }
+
+        return (int) $match[1];
+    }
+
+    private function extractFloatFromRconResponse(?string $response): ?float
+    {
+        if (!is_string($response) || $this->isNoEntityResponse($response)) {
+            return null;
+        }
+
+        if (!preg_match('/(-?\d+(?:\.\d+)?)(?:[bBsSfFdDlL])?$/', trim($response), $match)) {
+            return null;
+        }
+
+        return (float) $match[1];
+    }
+
+    private function isNoEntityResponse(?string $response): bool
+    {
+        if (!is_string($response) || $response === '') {
+            return true;
+        }
+
+        return str_contains($response, 'No entity')
+            || str_contains($response, 'No player')
+            || str_contains($response, 'No entity was found')
+            || str_contains($response, 'Found no elements');
     }
 
     private function getOfflineDetailsFromNbt(Server $server, string $uuid): ?array
     {
-        if (empty($uuid) || $uuid === 'Unknown') return null;
+        if ($uuid === '' || $uuid === 'Unknown') {
+            return null;
+        }
 
-        // Locate File
-        // Usually world/playerdata/<uuid>.dat
-        // We need to know the level-name
-        
-        /** @var \App\Repositories\Daemon\DaemonFileRepository $fileRepository */
-        $fileRepository = app(\App\Repositories\Daemon\DaemonFileRepository::class);
-        $fileRepository->setServer($server);
+        $properties = $this->getServerPropertiesFromFile($server);
+        $levelName = trim((string) ($properties['level-name'] ?? 'world'));
+        if ($levelName === '') {
+            $levelName = 'world';
+        }
 
-        $levelName = 'world';
+        $path = "{$levelName}/playerdata/{$uuid}.dat";
+
         try {
-            $props = $fileRepository->getContent('server.properties');
-            if (preg_match('/^\s*level-name\s*=\s*(.*)$/m', $props, $matches)) {
-                $levelName = trim($matches[1]);
-            }
-        } catch (\Exception $e) {}
-
-        // Construct path relative to server root
-        // Note: DaemonFileRepository usually works with relative paths for content, but we need absolute path for NbtService?
-        // Actually, NbtService needs a local file system path or raw content.
-        // DaemonFileRepository::getContent returns string content. 
-        // Our NbtService::parseFile expects a PATH. 
-        // However, we are in a plugin on the panel. The file might be on a remote node (Wings).
-        // Standard Pelican Panel plugins run on the Panel side. Files are fetched from Wings via API/Repository.
-        // We CANNOT directly access disk unless node is local.
-        // So we should fetch CONTENT using DaemonFileRepository (which handles Wings API) and pass CONTENT to NbtParser.
-        
-        $path = "$levelName/playerdata/$uuid.dat";
-        
-        try {
-            // This pulls the raw binary content strings (API response)
-            // Warning: large files might be an issue, but player.dat is small (few KB).
-            $content = $fileRepository->getContent($path);
-            
-            // adapt NbtService to accept content string
+            $content = $this->getFileRepository($server)->getContent($path);
             $data = $this->nbtService->parseString($content);
-            
-            if (empty($data)) return null;
+
+            if (empty($data) || !is_array($data)) {
+                return null;
+            }
 
             $result = [];
 
-            // Extract Health
-            if (isset($data['Health'])) $result['health'] = $data['Health']; // Float on NBT
-            
-            // Extract Food
-            if (isset($data['foodLevel'])) $result['food'] = $data['foodLevel']; // Int
-
-            // Extract XP
-            if (isset($data['XpLevel'])) $result['level'] = $data['XpLevel'];
-
-            // Extract Gamemode
-            if (isset($data['playerGameType'])) {
-                 $gmById = [0 => 'Survival', 1 => 'Creative', 2 => 'Adventure', 3 => 'Spectator'];
-                 $result['gamemode'] = $gmById[$data['playerGameType']] ?? 'Unknown';
+            if (isset($data['Health'])) {
+                $result['health'] = (float) $data['Health'];
             }
 
-            // Extract Inventory
-            // NBT Inventory structure: List of Compounds {Slot:byte, id:string, Count:byte, tag:{...}}
-            if (isset($data['Inventory']) && is_array($data['Inventory'])) {
-                $inv = [];
-                foreach ($data['Inventory'] as $item) {
-                     // Normalize keys to match RCON format
-                     $slot = $item['Slot'] ?? $item['slot'] ?? null;
-                     $id = $item['id'] ?? $item['Id'] ?? null;
-                     $count = $item['Count'] ?? $item['count'] ?? 1;
+            if (isset($data['foodLevel'])) {
+                $result['food'] = (int) $data['foodLevel'];
+            }
 
-                     // NBT Slot is Byte (signed?), RCON is int.
-                     // Filter out invalid items
-                     if ($id && $slot !== null) {
-                         $inv[] = [
-                             'slot' => $slot,
-                             'id' => $id,
-                             'count' => $count,
-                         ];
-                     }
+            if (isset($data['XpLevel'])) {
+                $result['level'] = (int) $data['XpLevel'];
+            }
+
+            if (isset($data['playerGameType'])) {
+                $gamemodeById = [
+                    0 => 'Survival',
+                    1 => 'Creative',
+                    2 => 'Adventure',
+                    3 => 'Spectator',
+                ];
+                $result['gamemode'] = $gamemodeById[(int) $data['playerGameType']] ?? 'Unknown';
+            }
+
+            if (isset($data['Inventory']) && is_array($data['Inventory'])) {
+                $inventory = [];
+
+                foreach ($data['Inventory'] as $item) {
+                    if (!is_array($item)) {
+                        continue;
+                    }
+
+                    $slot = $item['Slot'] ?? $item['slot'] ?? null;
+                    $id = $item['id'] ?? $item['Id'] ?? null;
+                    $count = $item['Count'] ?? $item['count'] ?? 1;
+
+                    if (!is_string($id) || $id === '' || $slot === null) {
+                        continue;
+                    }
+
+                    $inventory[] = [
+                        'slot' => (int) $slot,
+                        'id' => $id,
+                        'count' => (int) $count,
+                    ];
                 }
-                $result['inventory_data'] = $inv;
+
+                $result['inventory_data'] = $inventory;
             }
 
             return $result;
-            
-        } catch (\Exception $e) {
-            // File not found or read error
+        } catch (Throwable $e) {
             return null;
         }
     }
