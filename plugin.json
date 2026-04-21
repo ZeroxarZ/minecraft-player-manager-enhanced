@@ -1,6 +1,6 @@
 {
-    "id": "minecraft-player-manager-enhanced",
-    "name": "Minecraft Player Manager Enhanced",
+    "id": "minecraft-player-manager",
+    "name": "Minecraft Player Manager",
     "description": "Manage Minecraft players directly from the Pelican Panel.",
     "category": "plugin",
     "url": "https://github.com/ZeroxarZ/minecraft-player-manager-enhanced",
