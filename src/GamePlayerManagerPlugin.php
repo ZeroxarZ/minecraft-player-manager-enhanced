@@ -45,31 +45,44 @@ class GamePlayerManagerPlugin implements Plugin, HasPluginSettings
 
     public function getSettingsForm(): array
     {
+        $settings = $this->getSettingsFormData();
+
         return [
             Toggle::make('rcon_enabled')
                 ->label(__('minecraft-player-manager::messages.settings.rcon_enabled'))
                 ->helperText(__('minecraft-player-manager::messages.settings.rcon_enabled_helper'))
-                ->default(env('MC_PLAYER_MANAGER_RCON_ENABLED', false)),
+                ->default($settings['rcon_enabled']),
             \Filament\Forms\Components\TextInput::make('rcon_host')
                 ->label(__('minecraft-player-manager::messages.settings.rcon_host'))
                 ->helperText(__('minecraft-player-manager::messages.settings.rcon_host_helper'))
-                ->default(env('MC_PLAYER_MANAGER_RCON_HOST', '127.0.0.1')),
+                ->default($settings['rcon_host']),
             \Filament\Forms\Components\TextInput::make('rcon_port')
                 ->label(__('minecraft-player-manager::messages.settings.rcon_port'))
                 ->helperText(__('minecraft-player-manager::messages.settings.rcon_port_helper'))
                 ->numeric()
-                ->default((int) env('MC_PLAYER_MANAGER_RCON_PORT', 25575)),
+                ->default($settings['rcon_port']),
             \Filament\Forms\Components\TextInput::make('rcon_password')
                 ->label(__('minecraft-player-manager::messages.settings.rcon_password'))
                 ->helperText(__('minecraft-player-manager::messages.settings.rcon_password_helper'))
                 ->password()
                 ->revealable()
-                ->default(env('MC_PLAYER_MANAGER_RCON_PASSWORD', '')),
+                ->default($settings['rcon_password']),
             \Filament\Forms\Components\TextInput::make('nav_sort')
                 ->label(__('minecraft-player-manager::messages.settings.nav_sort'))
                 ->helperText(__('minecraft-player-manager::messages.settings.nav_sort_helper'))
                 ->numeric()
-                ->default(env('MC_PLAYER_MANAGER_NAV_SORT', 2)),
+                ->default($settings['nav_sort']),
+        ];
+    }
+
+    public function getSettingsFormData(): array
+    {
+        return [
+            'rcon_enabled' => filter_var(env('MC_PLAYER_MANAGER_RCON_ENABLED', false), FILTER_VALIDATE_BOOL, FILTER_NULL_ON_FAILURE) ?? false,
+            'rcon_host' => trim((string) env('MC_PLAYER_MANAGER_RCON_HOST', '127.0.0.1')),
+            'rcon_port' => (int) env('MC_PLAYER_MANAGER_RCON_PORT', 25575),
+            'rcon_password' => (string) env('MC_PLAYER_MANAGER_RCON_PASSWORD', ''),
+            'nav_sort' => (int) env('MC_PLAYER_MANAGER_NAV_SORT', 2),
         ];
     }
 
